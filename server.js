@@ -29,6 +29,7 @@ function emitPlayerList() {
 
 io.on("connection", (socket) => {
   console.log(`[socket] connected: ${socket.id}`);
+  socket.emit("update_player_list", players);
 
   socket.on("join_game", (payload) => {
     const username =
@@ -50,6 +51,10 @@ io.on("connection", (socket) => {
     });
 
     emitPlayerList();
+  });
+
+  socket.on("request_player_list", () => {
+    socket.emit("update_player_list", players);
   });
 
   socket.on("disconnect", (reason) => {
