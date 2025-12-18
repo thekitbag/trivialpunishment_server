@@ -8,7 +8,7 @@ const ip = require("ip");
 const sqlite3 = require("sqlite3").verbose();
 const { Server } = require("socket.io");
 
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.PORT) || 3001;
 const DB_DIR = path.join(__dirname, "server");
 const DB_PATH = path.join(DB_DIR, "game_data.db");
 
@@ -30,8 +30,13 @@ let db;
 
 function dbRun(sql, params = []) {
   return new Promise((resolve, reject) => {
+    console.log(`[db] RUN: ${sql.substring(0, 50)}... Params:`, params);
     db.run(sql, params, function (err) {
-      if (err) return reject(err);
+      if (err) {
+          console.error('[db] RUN ERROR:', err);
+          return reject(err);
+      }
+      console.log('[db] RUN SUCCESS');
       resolve(this);
     });
   });
@@ -70,6 +75,10 @@ async function initDb() {
       game_code TEXT PRIMARY KEY,
       host_socket_id TEXT,
       game_state TEXT,
+      max_players INTEGER DEFAULT 3,
+      rounds_per_player INTEGER DEFAULT 2,
+      questions_per_round INTEGER DEFAULT 5,
+      current_round INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -88,6 +97,22 @@ async function initDb() {
 
   await dbRun(`CREATE INDEX IF NOT EXISTS idx_players_game_code ON players(game_code)`);
   await dbRun(`CREATE INDEX IF NOT EXISTS idx_players_socket_id ON players(socket_id)`);
+}
+
+async function ensureGamesColumns() {
+  const rows = await dbAll(`PRAGMA table_info(games)`);
+  const existingColumns = new Set(rows.map((row) => row.name));
+
+  const addColumnIfMissing = async (name, typeAndDefault) => {
+    if (existingColumns.has(name)) return;
+    await dbRun(`ALTER TABLE games ADD COLUMN ${name} ${typeAndDefault}`);
+    existingColumns.add(name);
+  };
+
+  await addColumnIfMissing("max_players", "INTEGER DEFAULT 3");
+  await addColumnIfMissing("rounds_per_player", "INTEGER DEFAULT 2");
+  await addColumnIfMissing("questions_per_round", "INTEGER DEFAULT 5");
+  await addColumnIfMissing("current_round", "INTEGER DEFAULT 0");
 }
 
 function randomGameCode() {
@@ -127,6 +152,25 @@ async function getPlayersForGame(gameCode) {
   }));
 }
 
+function clampInt(value, min, max, fallback) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  const intValue = Math.trunc(num);
+  if (intValue < min || intValue > max) return fallback;
+  return intValue;
+}
+
+async function getGame(gameCode) {
+  return dbGet(
+    `
+      SELECT game_code, host_socket_id, game_state, max_players, rounds_per_player, questions_per_round, current_round
+      FROM games
+      WHERE game_code = ?
+    `,
+    [gameCode]
+  );
+}
+
 async function emitPlayerListToRoom(gameCode) {
   const players = await getPlayersForGame(gameCode);
   io.to(gameCode).emit("update_player_list", players);
@@ -135,49 +179,45 @@ async function emitPlayerListToRoom(gameCode) {
 io.on("connection", (socket) => {
   console.log(`[socket] connected: ${socket.id}`);
 
-  socket.on("create_game", async () => {
+  socket.on("create_game", async (payload) => {
+    console.log(`[server] Received create_game from ${socket.id}`, payload);
     try {
-      const gameCode = await generateUniqueGameCode();
-      await dbRun(
-        `INSERT INTO games (game_code, host_socket_id, game_state) VALUES (?, ?, ?)`,
-        [gameCode, socket.id, "LOBBY"]
-      );
+      const maxPlayers = clampInt(payload?.maxPlayers, 2, 8, 3);
+      const roundsPerPlayer = clampInt(payload?.roundsPerPlayer, 1, 5, 2);
+      const questionsPerRound = clampInt(payload?.questionsPerRound, 3, 10, 5);
 
+      console.log('[server] Generating code...');
+      const gameCode = await generateUniqueGameCode();
+      console.log(`[server] Generated code: ${gameCode}. Inserting into DB...`);
+      
+      await dbRun(
+        `
+          INSERT INTO games (
+            game_code,
+            host_socket_id,
+            game_state,
+            max_players,
+            rounds_per_player,
+            questions_per_round,
+            current_round
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `,
+        [gameCode, socket.id, "LOBBY", maxPlayers, roundsPerPlayer, questionsPerRound, 0]
+      );
+      
+      console.log('[server] Insert successful. Joining room...');
       socket.join(gameCode);
-      socket.emit("game_created", { gameCode });
+      socket.emit("game_created", {
+        gameCode,
+        maxPlayers,
+        roundsPerPlayer,
+        questionsPerRound
+      });
       await emitPlayerListToRoom(gameCode);
+      console.log('[server] create_game completed.');
     } catch (err) {
       console.error("[create_game] failed", err);
       socket.emit("error", "Unable to create game");
-    }
-  });
-
-  socket.on("reconnect_host", async (payload) => {
-    try {
-      const gameCodeRaw = payload && typeof payload.gameCode === "string" ? payload.gameCode : "";
-      const gameCode = gameCodeRaw.trim().toUpperCase();
-
-      if (!gameCode) {
-         socket.emit("error", "Invalid game code");
-         return;
-      }
-
-      const game = await dbGet(`SELECT game_code FROM games WHERE game_code = ?`, [gameCode]);
-      if (!game) {
-        socket.emit("error", "Game not found"); // Client should clear storage
-        return;
-      }
-
-      // Update host socket ID
-      await dbRun(`UPDATE games SET host_socket_id = ? WHERE game_code = ?`, [socket.id, gameCode]);
-
-      socket.join(gameCode);
-      socket.emit("game_created", { gameCode }); // Re-use event to set client state
-      await emitPlayerListToRoom(gameCode);
-      console.log(`[reconnect_host] Host reconnected to ${gameCode}`);
-    } catch (err) {
-      console.error("[reconnect_host] failed", err);
-      socket.emit("error", "Unable to reconnect");
     }
   });
 
@@ -193,7 +233,7 @@ io.on("connection", (socket) => {
         return;
       }
 
-      const game = await dbGet(`SELECT game_code FROM games WHERE game_code = ?`, [gameCode]);
+      const game = await getGame(gameCode);
       if (!game) {
         socket.emit("error", "Game not found");
         return;
@@ -206,6 +246,24 @@ io.on("connection", (socket) => {
         [gameCode, normalizedUsername]
       );
 
+      const playerCountRow = await dbGet(`SELECT COUNT(*) AS count FROM players WHERE game_code = ?`, [
+        gameCode
+      ]);
+      const playerCount = Number(playerCountRow?.count) || 0;
+      const maxPlayers = Number(game.max_players) || 3;
+
+      if (!existingPlayer && playerCount >= maxPlayers) {
+        socket.emit("error", "Room Full");
+        socket.leave(gameCode);
+        return;
+      }
+
+      if (!existingPlayer && game.game_state && game.game_state !== "LOBBY") {
+        socket.emit("error", "Game already started");
+        socket.leave(gameCode);
+        return;
+      }
+
       if (existingPlayer) {
         await dbRun(`UPDATE players SET socket_id = ? WHERE id = ?`, [socket.id, existingPlayer.id]);
       } else {
@@ -215,10 +273,54 @@ io.on("connection", (socket) => {
         );
       }
 
+      const updatedCountRow = await dbGet(`SELECT COUNT(*) AS count FROM players WHERE game_code = ?`, [
+        gameCode
+      ]);
+      const updatedCount = Number(updatedCountRow?.count) || 0;
+
+      if (game.game_state === "LOBBY" && updatedCount === maxPlayers) {
+        await dbRun(`UPDATE games SET game_state = ? WHERE game_code = ?`, ["STARTING", gameCode]);
+        io.to(gameCode).emit("game_started");
+      }
+
       await emitPlayerListToRoom(gameCode);
     } catch (err) {
       console.error("[join_game] failed", err);
       socket.emit("error", "Unable to join game");
+    }
+  });
+
+  socket.on("reconnect_host", async (payload) => {
+    try {
+      const gameCodeRaw = payload && typeof payload.gameCode === "string" ? payload.gameCode : "";
+      const gameCode = gameCodeRaw.trim().toUpperCase();
+      if (gameCode.length !== 4) {
+        socket.emit("error", "Invalid game code");
+        return;
+      }
+
+      const game = await getGame(gameCode);
+      if (!game) {
+        socket.emit("error", "Game not found");
+        return;
+      }
+
+      await dbRun(`UPDATE games SET host_socket_id = ? WHERE game_code = ?`, [socket.id, gameCode]);
+      socket.join(gameCode);
+
+      socket.emit("host_reconnected", {
+        gameCode,
+        gameState: game.game_state,
+        maxPlayers: game.max_players,
+        roundsPerPlayer: game.rounds_per_player,
+        questionsPerRound: game.questions_per_round,
+        currentRound: game.current_round
+      });
+
+      await emitPlayerListToRoom(gameCode);
+    } catch (err) {
+      console.error("[reconnect_host] failed", err);
+      socket.emit("error", "Unable to reconnect host");
     }
   });
 
@@ -264,6 +366,7 @@ io.on("connection", (socket) => {
 
 async function start() {
   await initDb();
+  await ensureGamesColumns();
 
   httpServer.listen(PORT, () => {
     const lanIp = ip.address();
