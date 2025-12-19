@@ -1,3 +1,4 @@
+require("dotenv").config();
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -7,16 +8,110 @@ const express = require("express");
 const ip = require("ip");
 const sqlite3 = require("sqlite3").verbose();
 const { Server } = require("socket.io");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 
 const PORT = Number(process.env.PORT) || 3001;
 const DB_DIR = path.join(__dirname, "server");
 const DB_PATH = path.join(DB_DIR, "game_data.db");
+const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-in-production";
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 app.get("/", (_req, res) => {
   res.status(200).send("Hello World");
+});
+
+app.post("/api/auth/signup", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+
+    if (!username || !password) {
+      return res.status(400).json({ error: "Username and password are required" });
+    }
+
+    if (typeof username !== "string" || typeof password !== "string") {
+      return res.status(400).json({ error: "Invalid username or password format" });
+    }
+
+    const normalizedUsername = username.trim().toLowerCase();
+
+    if (normalizedUsername.length < 3 || password.length < 6) {
+      return res.status(400).json({ error: "Username must be at least 3 characters and password at least 6 characters" });
+    }
+
+    const existingUser = await dbGet(`SELECT id FROM users WHERE LOWER(username) = LOWER(?)`, [normalizedUsername]);
+    if (existingUser) {
+      return res.status(409).json({ error: "Username already exists" });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const result = await dbRun(
+      `INSERT INTO users (username, password_hash) VALUES (?, ?)`,
+      [normalizedUsername, passwordHash]
+    );
+
+    const token = jwt.sign({ id: result.lastID, username: normalizedUsername }, JWT_SECRET, {
+      expiresIn: "7d"
+    });
+
+    res.status(201).json({
+      token,
+      user: {
+        id: result.lastID,
+        username: normalizedUsername
+      }
+    });
+  } catch (err) {
+    console.error("[signup] error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+
+    if (!username || !password) {
+      return res.status(400).json({ error: "Username and password are required" });
+    }
+
+    if (typeof username !== "string" || typeof password !== "string") {
+      return res.status(400).json({ error: "Invalid username or password format" });
+    }
+
+    const normalizedUsername = username.trim().toLowerCase();
+
+    const user = await dbGet(`SELECT id, username, password_hash FROM users WHERE LOWER(username) = LOWER(?)`, [
+      normalizedUsername
+    ]);
+
+    if (!user) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    const isValidPassword = await bcrypt.compare(password, user.password_hash);
+    if (!isValidPassword) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, {
+      expiresIn: "7d"
+    });
+
+    res.status(200).json({
+      token,
+      user: {
+        id: user.id,
+        username: user.username
+      }
+    });
+  } catch (err) {
+    console.error("[login] error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 const httpServer = http.createServer(app);
@@ -30,13 +125,10 @@ let db;
 
 function dbRun(sql, params = []) {
   return new Promise((resolve, reject) => {
-    console.log(`[db] RUN: ${sql.substring(0, 50)}... Params:`, params);
     db.run(sql, params, function (err) {
       if (err) {
-          console.error('[db] RUN ERROR:', err);
           return reject(err);
       }
-      console.log('[db] RUN SUCCESS');
       resolve(this);
     });
   });
@@ -71,6 +163,15 @@ async function initDb() {
   });
 
   await dbRun(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await dbRun(`
     CREATE TABLE IF NOT EXISTS games (
       game_code TEXT PRIMARY KEY,
       host_socket_id TEXT,
@@ -91,7 +192,9 @@ async function initDb() {
       username TEXT,
       score INTEGER DEFAULT 0,
       is_host BOOLEAN DEFAULT 0,
-      FOREIGN KEY (game_code) REFERENCES games(game_code)
+      user_id INTEGER,
+      FOREIGN KEY (game_code) REFERENCES games(game_code),
+      FOREIGN KEY (user_id) REFERENCES users(id)
     )
   `);
 
@@ -113,6 +216,19 @@ async function ensureGamesColumns() {
   await addColumnIfMissing("rounds_per_player", "INTEGER DEFAULT 2");
   await addColumnIfMissing("questions_per_round", "INTEGER DEFAULT 5");
   await addColumnIfMissing("current_round", "INTEGER DEFAULT 0");
+}
+
+async function ensurePlayersColumns() {
+  const rows = await dbAll(`PRAGMA table_info(players)`);
+  const existingColumns = new Set(rows.map((row) => row.name));
+
+  const addColumnIfMissing = async (name, typeAndDefault) => {
+    if (existingColumns.has(name)) return;
+    await dbRun(`ALTER TABLE players ADD COLUMN ${name} ${typeAndDefault}`);
+    existingColumns.add(name);
+  };
+
+  await addColumnIfMissing("user_id", "INTEGER");
 }
 
 function randomGameCode() {
@@ -176,19 +292,35 @@ async function emitPlayerListToRoom(gameCode) {
   io.to(gameCode).emit("update_player_list", players);
 }
 
+io.use((socket, next) => {
+  const token = socket.handshake.auth.token;
+
+  if (!token) {
+    socket.user = { id: null, username: "Guest", isGuest: true };
+    return next();
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    socket.user = { id: decoded.id, username: decoded.username, isGuest: false };
+    next();
+  } catch (err) {
+    console.error("[socket auth] invalid token:", err.message);
+    socket.user = { id: null, username: "Guest", isGuest: true };
+    next();
+  }
+});
+
 io.on("connection", (socket) => {
-  console.log(`[socket] connected: ${socket.id}`);
+  console.log(`[socket] connected: ${socket.id} (user: ${socket.user.username})`);
 
   socket.on("create_game", async (payload) => {
-    console.log(`[server] Received create_game from ${socket.id}`, payload);
     try {
       const maxPlayers = clampInt(payload?.maxPlayers, 2, 8, 3);
       const roundsPerPlayer = clampInt(payload?.roundsPerPlayer, 1, 5, 2);
       const questionsPerRound = clampInt(payload?.questionsPerRound, 3, 10, 5);
 
-      console.log('[server] Generating code...');
       const gameCode = await generateUniqueGameCode();
-      console.log(`[server] Generated code: ${gameCode}. Inserting into DB...`);
       
       await dbRun(
         `
@@ -205,7 +337,6 @@ io.on("connection", (socket) => {
         [gameCode, socket.id, "LOBBY", maxPlayers, roundsPerPlayer, questionsPerRound, 0]
       );
       
-      console.log('[server] Insert successful. Joining room...');
       socket.join(gameCode);
       socket.emit("game_created", {
         gameCode,
@@ -214,7 +345,6 @@ io.on("connection", (socket) => {
         questionsPerRound
       });
       await emitPlayerListToRoom(gameCode);
-      console.log('[server] create_game completed.');
     } catch (err) {
       console.error("[create_game] failed", err);
       socket.emit("error", "Unable to create game");
@@ -367,6 +497,7 @@ io.on("connection", (socket) => {
 async function start() {
   await initDb();
   await ensureGamesColumns();
+  await ensurePlayersColumns();
 
   httpServer.listen(PORT, () => {
     const lanIp = ip.address();
