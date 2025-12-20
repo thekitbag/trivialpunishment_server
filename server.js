@@ -16,9 +16,52 @@ const DB_DIR = path.join(__dirname, "server");
 const DB_PATH = path.join(DB_DIR, "game_data.db");
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-in-production";
 
+const MOCK_QUESTIONS = [
+  {
+    text: "Why did the scarecrow win an award?",
+    options: ["He was outstanding in his field", "He had brains", "He was funny", "He worked hard"],
+    correct: 0
+  },
+  {
+    text: "What do you call a bear with no teeth?",
+    options: ["A gummy bear", "A teddy bear", "A scary bear", "A baby bear"],
+    correct: 0
+  },
+  {
+    text: "Why don't scientists trust atoms?",
+    options: ["They're too small", "They make up everything", "They're unstable", "They're invisible"],
+    correct: 1
+  },
+  {
+    text: "What did the ocean say to the beach?",
+    options: ["Hello", "Nothing, it just waved", "Goodbye", "Nice weather"],
+    correct: 1
+  },
+  {
+    text: "Why did the bicycle fall over?",
+    options: ["It was broken", "It was two tired", "It was old", "Someone pushed it"],
+    correct: 1
+  }
+];
+
+const QUESTION_TIME_MS = 30000;
+const REVEAL_TIME_MS = 5000;
+const STARTING_DELAY_MS = 3000;
+
+const activeSessions = new Map();
+
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+app.use((req, res, next) => {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] [HTTP] ${req.method} ${req.path}`);
+  if (req.method === "POST" || req.method === "PUT" || req.method === "PATCH") {
+    console.log(`[${timestamp}] [HTTP] Body:`, JSON.stringify(req.body));
+  }
+  next();
+});
 
 app.get("/", (_req, res) => {
   res.status(200).send("Hello World");
@@ -115,11 +158,27 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 const httpServer = http.createServer(app);
-const io = new Server(httpServer, {
+const ioServer = new Server(httpServer, {
   cors: {
     origin: "*"
   }
 });
+
+const io = {
+  ...ioServer,
+  to: (room) => {
+    const originalEmit = ioServer.to(room).emit.bind(ioServer.to(room));
+    return {
+      emit: (event, ...args) => {
+        const timestamp = new Date().toISOString();
+        console.log(`[${timestamp}] [WS->Client] Room: ${room}, Event: ${event}, Data:`, JSON.stringify(args));
+        return originalEmit(event, ...args);
+      }
+    };
+  },
+  use: ioServer.use.bind(ioServer),
+  on: ioServer.on.bind(ioServer)
+};
 
 let db;
 
@@ -252,7 +311,7 @@ async function generateUniqueGameCode(maxAttempts = 25) {
 async function getPlayersForGame(gameCode) {
   const rows = await dbAll(
     `
-      SELECT socket_id, username, score, is_host
+      SELECT id, socket_id, username, score, is_host
       FROM players
       WHERE game_code = ? AND socket_id IS NOT NULL
       ORDER BY id ASC
@@ -261,7 +320,7 @@ async function getPlayersForGame(gameCode) {
   );
 
   return rows.map((row) => ({
-    id: row.socket_id,
+    id: row.id, // Use players.id (PK) instead of socket_id
     username: row.username,
     score: row.score,
     isHost: Boolean(row.is_host)
@@ -292,6 +351,137 @@ async function emitPlayerListToRoom(gameCode) {
   io.to(gameCode).emit("update_player_list", players);
 }
 
+function getOrCreateSession(gameCode) {
+  if (!activeSessions.has(gameCode)) {
+    activeSessions.set(gameCode, {
+      currentQuestionIndex: 0,
+      questionTimer: null,
+      revealTimer: null,
+      answers: new Map()
+    });
+  }
+  return activeSessions.get(gameCode);
+}
+
+function clearSessionTimers(gameCode) {
+  const session = activeSessions.get(gameCode);
+  if (session) {
+    if (session.questionTimer) clearTimeout(session.questionTimer);
+    if (session.revealTimer) clearTimeout(session.revealTimer);
+  }
+}
+
+async function startQuestion(gameCode) {
+  const game = await getGame(gameCode);
+  if (!game) return;
+
+  const session = getOrCreateSession(gameCode);
+  const questionIndex = session.currentQuestionIndex;
+  const totalQuestions = game.rounds_per_player * (await getPlayersForGame(gameCode)).length;
+
+  if (questionIndex >= Math.min(totalQuestions, MOCK_QUESTIONS.length)) {
+    await endGame(gameCode);
+    return;
+  }
+
+  await dbRun(`UPDATE games SET game_state = ?, current_round = ? WHERE game_code = ?`, [
+    "QUESTION",
+    questionIndex + 1,
+    gameCode
+  ]);
+
+  session.answers.clear();
+
+  const question = MOCK_QUESTIONS[questionIndex % MOCK_QUESTIONS.length];
+  const timeLimitSeconds = Math.floor(QUESTION_TIME_MS / 1000);
+
+  io.to(gameCode).emit("question_start", {
+    text: question.text,
+    options: question.options,
+    round: questionIndex + 1,
+    totalRounds: totalQuestions,
+    timeLimit: timeLimitSeconds
+  });
+
+  session.questionTimer = setTimeout(() => {
+    revealAnswer(gameCode);
+  }, QUESTION_TIME_MS);
+}
+
+async function revealAnswer(gameCode) {
+  const session = activeSessions.get(gameCode);
+  if (!session) return;
+
+  if (session.questionTimer) {
+    clearTimeout(session.questionTimer);
+    session.questionTimer = null;
+  }
+
+  const question = MOCK_QUESTIONS[session.currentQuestionIndex % MOCK_QUESTIONS.length];
+  const players = await getPlayersForGame(gameCode);
+
+  for (const player of players) {
+    const answer = session.answers.get(player.id);
+    if (answer !== undefined && answer === question.correct) {
+      await dbRun(`UPDATE players SET score = score + 100 WHERE id = ?`, [player.id]);
+    }
+  }
+
+  const updatedPlayers = await getPlayersForGame(gameCode);
+  const scores = updatedPlayers.map((p) => ({
+    id: p.id,
+    username: p.username,
+    score: p.score
+  }));
+
+  await dbRun(`UPDATE games SET game_state = ? WHERE game_code = ?`, ["REVEAL", gameCode]);
+
+  io.to(gameCode).emit("round_reveal", {
+    correctIndex: question.correct,
+    scores
+  });
+
+  session.currentQuestionIndex++;
+
+  session.revealTimer = setTimeout(() => {
+    startQuestion(gameCode);
+  }, REVEAL_TIME_MS);
+}
+
+async function endGame(gameCode) {
+  const session = activeSessions.get(gameCode);
+  if (session) {
+    clearSessionTimers(gameCode);
+  }
+
+  await dbRun(`UPDATE games SET game_state = ? WHERE game_code = ?`, ["GAME_OVER", gameCode]);
+
+  const players = await getPlayersForGame(gameCode);
+  const finalScores = players.map((p) => ({
+    id: p.id,
+    username: p.username,
+    score: p.score
+  })).sort((a, b) => b.score - a.score);
+
+  io.to(gameCode).emit("game_over", { scores: finalScores });
+
+  await dbRun(`DELETE FROM players WHERE game_code = ?`, [gameCode]);
+
+  activeSessions.delete(gameCode);
+}
+
+async function checkAllAnswered(gameCode) {
+  const session = activeSessions.get(gameCode);
+  if (!session) return;
+
+  const players = await getPlayersForGame(gameCode);
+  const allAnswered = players.every((p) => session.answers.has(p.id));
+
+  if (allAnswered) {
+    revealAnswer(gameCode);
+  }
+}
+
 io.use((socket, next) => {
   const token = socket.handshake.auth.token;
 
@@ -312,7 +502,25 @@ io.use((socket, next) => {
 });
 
 io.on("connection", (socket) => {
-  console.log(`[socket] connected: ${socket.id} (user: ${socket.user.username})`);
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] [WS] Socket connected: ${socket.id} (user: ${socket.user.username})`);
+
+  const originalOn = socket.on.bind(socket);
+  const originalEmit = socket.emit.bind(socket);
+
+  socket.on = (event, handler) => {
+    return originalOn(event, async (...args) => {
+      const ts = new Date().toISOString();
+      console.log(`[${ts}] [WS<-Client] Socket: ${socket.id}, Event: ${event}, Data:`, JSON.stringify(args));
+      return handler(...args);
+    });
+  };
+
+  socket.emit = (event, ...args) => {
+    const ts = new Date().toISOString();
+    console.log(`[${ts}] [WS->Client] Socket: ${socket.id}, Event: ${event}, Data:`, JSON.stringify(args));
+    return originalEmit(event, ...args);
+  };
 
   socket.on("create_game", async (payload) => {
     try {
@@ -371,10 +579,22 @@ io.on("connection", (socket) => {
 
       socket.join(gameCode);
 
-      const existingPlayer = await dbGet(
-        `SELECT id FROM players WHERE game_code = ? AND username = ? LIMIT 1`,
-        [gameCode, normalizedUsername]
-      );
+      let existingPlayer = null;
+      if (socket.user && !socket.user.isGuest && socket.user.id) {
+        // Try to find player by user_id if authenticated
+        existingPlayer = await dbGet(
+          `SELECT id FROM players WHERE game_code = ? AND user_id = ? LIMIT 1`,
+          [gameCode, socket.user.id]
+        );
+      }
+
+      if (!existingPlayer) {
+        // Fallback to username if not authenticated or no player found by user_id
+        existingPlayer = await dbGet(
+          `SELECT id FROM players WHERE game_code = ? AND username = ? LIMIT 1`,
+          [gameCode, normalizedUsername]
+        );
+      }
 
       const playerCountRow = await dbGet(`SELECT COUNT(*) AS count FROM players WHERE game_code = ?`, [
         gameCode
@@ -395,11 +615,17 @@ io.on("connection", (socket) => {
       }
 
       if (existingPlayer) {
-        await dbRun(`UPDATE players SET socket_id = ? WHERE id = ?`, [socket.id, existingPlayer.id]);
+        const userIdToUpdate = (socket.user && !socket.user.isGuest) ? socket.user.id : null;
+        if (userIdToUpdate) {
+           await dbRun(`UPDATE players SET socket_id = ?, user_id = ? WHERE id = ?`, [socket.id, userIdToUpdate, existingPlayer.id]);
+        } else {
+           await dbRun(`UPDATE players SET socket_id = ? WHERE id = ?`, [socket.id, existingPlayer.id]);
+        }
       } else {
+        const userIdToInsert = (socket.user && !socket.user.isGuest) ? socket.user.id : null;
         await dbRun(
-          `INSERT INTO players (socket_id, game_code, username, score, is_host) VALUES (?, ?, ?, ?, ?)`,
-          [socket.id, gameCode, normalizedUsername, 0, 0]
+          `INSERT INTO players (socket_id, game_code, username, score, is_host, user_id) VALUES (?, ?, ?, ?, ?, ?)`,
+          [socket.id, gameCode, normalizedUsername, 0, 0, userIdToInsert]
         );
       }
 
@@ -411,6 +637,31 @@ io.on("connection", (socket) => {
       if (game.game_state === "LOBBY" && updatedCount === maxPlayers) {
         await dbRun(`UPDATE games SET game_state = ? WHERE game_code = ?`, ["STARTING", gameCode]);
         io.to(gameCode).emit("game_started");
+
+        setTimeout(() => {
+          startQuestion(gameCode);
+        }, STARTING_DELAY_MS);
+      } else if (existingPlayer && game.game_state !== "LOBBY") {
+        // If game is already running, tell the player it started so they can navigate to /play
+        socket.emit("game_started");
+        
+        if (game.game_state === "QUESTION") {
+          const session = activeSessions.get(gameCode);
+          if (session) {
+            const currentPlayers = await getPlayersForGame(gameCode);
+            const totalRounds = game.rounds_per_player * currentPlayers.length;
+            const question = MOCK_QUESTIONS[session.currentQuestionIndex % MOCK_QUESTIONS.length];
+            const timeLimitSeconds = Math.floor(QUESTION_TIME_MS / 1000);
+
+            socket.emit("question_start", {
+              text: question.text,
+              options: question.options,
+              round: session.currentQuestionIndex + 1,
+              totalRounds: totalRounds,
+              timeLimit: timeLimitSeconds
+            });
+          }
+        }
       }
 
       await emitPlayerListToRoom(gameCode);
@@ -471,8 +722,60 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("submit_answer", async (payload) => {
+    try {
+      const answerIndex = payload && typeof payload.answerIndex === "number" ? payload.answerIndex : -1;
+      const gameCodeRaw = payload && typeof payload.gameCode === "string" ? payload.gameCode : "";
+      const gameCode = gameCodeRaw.trim().toUpperCase();
+
+      if (answerIndex < 0 || answerIndex > 3 || !gameCode) {
+        socket.emit("error", "Invalid answer payload");
+        return;
+      }
+
+      const game = await getGame(gameCode);
+      if (!game || game.game_state !== "QUESTION") {
+        socket.emit("error", "Not accepting answers at this time");
+        return;
+      }
+
+      const session = activeSessions.get(gameCode);
+      if (!session) {
+        socket.emit("error", "Game session not found");
+        return;
+      }
+
+      const playerEntry = await dbGet(`SELECT id, username FROM players WHERE socket_id = ?`, [socket.id]);
+      if (!playerEntry) {
+        socket.emit("error", "Player not found in game session");
+        return;
+      }
+
+      if (session.answers.has(playerEntry.id)) {
+        return;
+      }
+
+      session.answers.set(playerEntry.id, answerIndex);
+
+      const hostSocket = await dbGet(`SELECT host_socket_id FROM games WHERE game_code = ?`, [gameCode]);
+
+      if (hostSocket && hostSocket.host_socket_id) {
+        io.to(hostSocket.host_socket_id).emit("player_answered", {
+          playerId: playerEntry.id,
+          username: playerEntry?.username
+        });
+      }
+
+      await checkAllAnswered(gameCode);
+    } catch (err) {
+      console.error("[submit_answer] failed", err);
+      socket.emit("error", "Unable to submit answer");
+    }
+  });
+
   socket.on("disconnect", async (reason) => {
-    console.log(`[socket] disconnected: ${socket.id} (${reason})`);
+    const ts = new Date().toISOString();
+    console.log(`[${ts}] [WS] Socket disconnected: ${socket.id} (reason: ${reason})`);
     try {
       const affectedGames = await dbAll(
         `SELECT DISTINCT game_code FROM players WHERE socket_id = ?`,
