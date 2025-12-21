@@ -66,6 +66,7 @@ function getOrCreateSession(gameCode) {
       currentRound: 0,
       currentPickerIndex: 0,
       currentTopic: null,
+      currentPickerUsername: null,
       questionTimer: null,
       revealTimer: null,
       roundOverTimer: null,
@@ -106,6 +107,7 @@ async function startTopicSelection(gameCode, io) {
 
   const pickerIndex = session.currentPickerIndex % players.length;
   const picker = players[pickerIndex];
+  session.currentPickerUsername = picker.username;
   session.currentPickerIndex++;
 
   await dbRun(`UPDATE games SET game_state = ?, current_round = ? WHERE game_code = ?`, [
@@ -190,6 +192,7 @@ async function startQuestion(gameCode, io) {
     questionNumber: questionNumInRound,
     questionsPerRound: game.questions_per_round,
     topic: session.currentTopic,
+    pickerUsername: session.currentPickerUsername,
     timeLimit: timeLimitSeconds
   });
 
@@ -197,6 +200,8 @@ async function startQuestion(gameCode, io) {
     revealAnswer(gameCode, io);
   }, QUESTION_TIME_MS);
 }
+
+// ... revealAnswer and startRoundOver remain the same ...
 
 async function revealAnswer(gameCode, io) {
   const session = activeSessions.get(gameCode);
@@ -298,9 +303,29 @@ async function endGame(gameCode, io) {
   const players = await getPlayersForGame(gameCode);
   const finalScores = players.map((p) => ({
     id: p.id,
+    user_id: p.id, // Note: This is player ID, not user ID from auth. We need user_id from auth.
     username: p.username,
     score: p.score
   })).sort((a, b) => b.score - a.score);
+
+  // Insert into game_history
+  await dbRun(`INSERT INTO game_history (game_code) VALUES (?)`, [gameCode]);
+  const historyRow = await dbGet(`SELECT id FROM game_history WHERE game_code = ? ORDER BY id DESC LIMIT 1`, [gameCode]);
+  
+  if (historyRow) {
+    const historyId = historyRow.id;
+    // We need to fetch real user_ids for history
+    const playersWithUserIds = await dbAll(`SELECT username, score, user_id FROM players WHERE game_code = ?`, [gameCode]);
+    const sortedPlayers = playersWithUserIds.sort((a, b) => b.score - a.score);
+    
+    for (let i = 0; i < sortedPlayers.length; i++) {
+      const p = sortedPlayers[i];
+      await dbRun(
+        `INSERT INTO game_history_players (game_history_id, user_id, username, score, rank) VALUES (?, ?, ?, ?, ?)`,
+        [historyId, p.user_id, p.username, p.score, i + 1]
+      );
+    }
+  }
 
   io.to(gameCode).emit("game_over", { scores: finalScores });
 

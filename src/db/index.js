@@ -79,6 +79,27 @@ async function initDb() {
     )
   `);
 
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS game_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      game_code TEXT NOT NULL,
+      played_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS game_history_players (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      game_history_id INTEGER NOT NULL,
+      user_id INTEGER,
+      username TEXT NOT NULL,
+      score INTEGER NOT NULL,
+      rank INTEGER NOT NULL,
+      FOREIGN KEY (game_history_id) REFERENCES game_history(id),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+  `);
+
   await dbRun(`CREATE INDEX IF NOT EXISTS idx_players_game_code ON players(game_code)`);
   await dbRun(`CREATE INDEX IF NOT EXISTS idx_players_socket_id ON players(socket_id)`);
 }
