@@ -33,7 +33,7 @@ app.get("/api/info", (_req, res) => {
 
 // Auth endpoints
 app.post("/api/auth/signup", async (req, res) => {
-// ... existing code ...
+  try {
     const { username, password } = req.body;
     const result = await authService.signup(username, password);
     res.status(201).json(result);
