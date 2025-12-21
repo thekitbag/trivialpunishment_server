@@ -1,5 +1,7 @@
 const express = require("express");
 const cors = require("cors");
+const ip = require("ip");
+const os = require("os");
 const authService = require("./services/authService");
 
 const app = express();
@@ -21,9 +23,17 @@ app.get("/", (_req, res) => {
   res.status(200).send("Hello World");
 });
 
+// Network Info Endpoint
+app.get("/api/info", (_req, res) => {
+  res.json({
+    ip: ip.address(),
+    hostname: os.hostname()
+  });
+});
+
 // Auth endpoints
 app.post("/api/auth/signup", async (req, res) => {
-  try {
+// ... existing code ...
     const { username, password } = req.body;
     const result = await authService.signup(username, password);
     res.status(201).json(result);
