@@ -118,6 +118,7 @@ async function ensureGamesColumns() {
   await addColumnIfMissing("rounds_per_player", "INTEGER DEFAULT 2");
   await addColumnIfMissing("questions_per_round", "INTEGER DEFAULT 5");
   await addColumnIfMissing("current_round", "INTEGER DEFAULT 0");
+  await addColumnIfMissing("difficulty", "TEXT DEFAULT 'Mixed'");
 }
 
 async function ensurePlayersColumns() {

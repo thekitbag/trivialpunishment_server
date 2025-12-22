@@ -32,7 +32,7 @@
 2.  **`games` Table:**
     - `game_code` (PK, 4-char string).
     - `host_socket_id`, `game_state` ('LOBBY', 'STARTING', etc).
-    - Config: `max_players`, `rounds_per_player`, `questions_per_round`.
+    - Config: `max_players`, `rounds_per_player`, `questions_per_round`, `difficulty` (TEXT, 'Easy'/'Medium'/'Hard'/'Mixed').
 3.  **`players` Table:**
     - `id` (PK), `socket_id`, `username`.
     - `game_code` (FK to games).
@@ -107,10 +107,12 @@
 - All functions accept `io` parameter when they need to emit events.
 
 ### `src/services/openAIService.js`
-- Export `generateRoundContent(topic, count)` - Generates punny title and trivia questions.
+- Export `generateRoundContent(topic, count, difficulty)` - Generates punny title and trivia questions with specified difficulty.
 - Export `setModel(model)` - Sets the model to use at runtime.
 - Export `getModel()` - Returns the current model being used.
 - Supports 7 models: mock, gpt-4o-mini, gpt-4o, gpt-4-turbo, gpt-4, o1, o3-mini.
+- Supports 4 difficulty levels: Easy, Medium, Hard, Mixed (default).
+- Tailors question difficulty based on setting: Easy (simple/common knowledge), Medium (standard), Hard (challenging/obscure), Mixed (varied).
 - Automatic fallback to mock questions if API fails or model set to "mock".
 - Comprehensive logging and validation of API responses.
 
@@ -160,7 +162,7 @@
   - `game_started` - Game transitioning from LOBBY to STARTING
   - `question_start` - New question begins (text, options, round number)
   - `player_answered` - Emitted to host when player submits answer
-  - `round_reveal` - Question results (correct answer, updated scores)
+  - `round_reveal` - Question results (`correctIndex`, `correctAnswerText`, `scores`, `pointsEarned`)
   - `game_over` - Final results (sorted scores)
   - `update_player_list` - Current players in game
   - `error` - Error message
@@ -179,6 +181,7 @@
     - **Topic Selection:** Players take turns picking topics.
     - **AI Content Generation:** Integration with OpenAI with 7 selectable models (mock, gpt-4o-mini, gpt-4o, gpt-4-turbo, gpt-4, o1, o3-mini).
     - **Interactive Model Selection:** Startup prompt to choose model or set via QUESTION_MODEL env var.
+    - **Difficulty Levels:** Configurable question difficulty (Easy, Medium, Hard, Mixed) set during game creation.
     - **Time-Based Scoring:** Points awarded based on speed (100pts instant → 10pts at 30s, 0 for incorrect).
     - Mock question data source (fallback when API unavailable or model set to "mock").
     - Answer submission and validation with timestamp tracking.

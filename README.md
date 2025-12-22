@@ -18,6 +18,7 @@ A local multiplayer, mobile-first trivia game server built with Node.js, Express
 
 - **Real-time multiplayer gameplay** using WebSocket (Socket.io)
 - **User authentication** with JWT and bcrypt password hashing
+- **Configurable difficulty levels** - Choose Easy, Medium, Hard, or Mixed difficulty for questions
 - **Time-based scoring** - Answer faster for more points (100 points instant → 10 points at time limit)
 - **AI-generated questions** using OpenAI API with automatic fallback to mock questions
 - **Topic selection** - Players take turns choosing trivia topics
@@ -253,8 +254,9 @@ The OpenAI service generates punny titles and trivia questions for game rounds u
 
 When a player selects a topic:
 - The server calls your selected OpenAI model (e.g., `gpt-4o-mini`)
+- Uses the difficulty level set during game creation (Easy, Medium, Hard, or Mixed)
 - Generates a punny title (e.g., "History" → "Past Tents")
-- Creates 5 trivia questions with 4 options each
+- Creates 5 trivia questions with 4 options each, tailored to the difficulty setting
 - If model is set to "mock" or API is unavailable → uses mock questions
 
 ### Response Format
@@ -275,6 +277,11 @@ When a player selects a topic:
 
 ### Features
 
+- **Configurable Difficulty:** Four difficulty levels (Easy, Medium, Hard, Mixed) tailored to player skill
+  - **Easy:** Simple, common knowledge questions for casual players
+  - **Medium:** Standard trivia difficulty
+  - **Hard:** Challenging, obscure questions for trivia enthusiasts
+  - **Mixed:** Varied difficulty for balanced gameplay
 - **Automatic Fallback:** Uses mock questions if API fails or key is missing
 - **Cost-Effective:** Uses `gpt-4o-mini` (~$0.001-0.002 per round)
 - **Creative Prompts:** Temperature `0.8` for varied, fun questions
@@ -413,6 +420,7 @@ trivialpunishment_server/
   - Max players (2-8)
   - Rounds per player (1-5)
   - Questions per round (3-10)
+  - Difficulty level (Easy, Medium, Hard, or Mixed)
 
 ### 3. Lobby Phase
 - Players join using 4-character game code
@@ -504,7 +512,7 @@ Response:
 
 | Event | Payload | Description |
 |-------|---------|-------------|
-| `create_game` | `{ maxPlayers, roundsPerPlayer, questionsPerRound }` | Create new game |
+| `create_game` | `{ maxPlayers, roundsPerPlayer, questionsPerRound, difficulty }` | Create new game |
 | `join_game` | `{ username, gameCode }` | Join existing game |
 | `submit_topic` | `{ gameCode, topic }` | Submit topic choice |
 | `submit_answer` | `{ gameCode, answerIndex }` | Submit answer (0-3) |
@@ -515,7 +523,7 @@ Response:
 
 | Event | Payload | Description |
 |-------|---------|-------------|
-| `game_created` | `{ gameCode, maxPlayers, ... }` | Game created successfully |
+| `game_created` | `{ gameCode, maxPlayers, difficulty, ... }` | Game created successfully |
 | `update_player_list` | `[{ id, username, score, isHost }]` | Updated player list |
 | `game_started` | `{}` | Game starting (lobby → playing) |
 | `topic_request` | `{ round, totalRounds }` | Your turn to pick topic |
@@ -556,7 +564,7 @@ Defined in `src/config.js`:
 
 **games**
 - `game_code` (PK), `host_socket_id`, `game_state`
-- `max_players`, `rounds_per_player`, `questions_per_round`, `current_round`
+- `max_players`, `rounds_per_player`, `questions_per_round`, `current_round`, `difficulty`
 
 **players**
 - `id` (PK), `socket_id`, `username`, `score`, `is_host`

@@ -52,7 +52,7 @@ function clampInt(value, min, max, fallback) {
 async function getGame(gameCode) {
   return dbGet(
     `
-      SELECT game_code, host_socket_id, game_state, max_players, rounds_per_player, questions_per_round, current_round
+      SELECT game_code, host_socket_id, game_state, max_players, rounds_per_player, questions_per_round, current_round, difficulty
       FROM games
       WHERE game_code = ?
     `,
@@ -167,8 +167,8 @@ async function handleTopicSubmission(gameCode, topic, submitterSocketId, io) {
 
   // Generate questions for this topic - AWAIT to ensure they're ready before starting questions
   try {
-    console.log(`[GameService] Generating questions for topic "${topic}"...`);
-    const content = await generateRoundContent(topic, game.questions_per_round);
+    console.log(`[GameService] Generating questions for topic "${topic}" with difficulty "${game.difficulty}"...`);
+    const content = await generateRoundContent(topic, game.questions_per_round, game.difficulty);
     session.currentRoundQuestions = content.questions;
     session.currentRoundTitle = content.punnyTitle;
     console.log(`[GameService] ✅ Round ready: "${content.punnyTitle}" with ${content.questions.length} questions`);
@@ -273,6 +273,9 @@ async function revealAnswer(gameCode, io) {
 
   const players = await getPlayersForGame(gameCode);
 
+  // Track points earned by each player for this question
+  const pointsEarned = {};
+
   for (const player of players) {
     const answerData = session.answers.get(player.id);
     if (answerData && answerData.answerIndex === question.correct) {
@@ -286,6 +289,10 @@ async function revealAnswer(gameCode, io) {
       const finalPoints = Math.max(10, Math.min(100, points)); // Ensure between 10 and 100
 
       await dbRun(`UPDATE players SET score = score + ? WHERE id = ?`, [finalPoints, player.id]);
+      pointsEarned[player.id] = finalPoints;
+    } else {
+      // Player answered incorrectly or didn't answer
+      pointsEarned[player.id] = 0;
     }
   }
 
@@ -296,9 +303,14 @@ async function revealAnswer(gameCode, io) {
     score: p.score
   }));
 
+  // Extract the correct answer text
+  const correctAnswerText = question.options[question.correct];
+
   io.to(gameCode).emit("round_reveal", {
     correctIndex: question.correct,
-    scores
+    correctAnswerText: correctAnswerText,
+    scores,
+    pointsEarned
   });
 
   session.currentQuestionIndex++;

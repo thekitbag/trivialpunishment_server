@@ -81,6 +81,12 @@ function createSocketServer(httpServer) {
         const roundsPerPlayer = gameService.clampInt(payload?.roundsPerPlayer, 1, 5, 2);
         const questionsPerRound = gameService.clampInt(payload?.questionsPerRound, 3, 10, 5);
 
+        // Validate difficulty setting
+        const allowedDifficulties = ['Easy', 'Medium', 'Hard', 'Mixed'];
+        const difficulty = allowedDifficulties.includes(payload?.difficulty)
+          ? payload.difficulty
+          : 'Mixed';
+
         const gameCode = await gameService.generateUniqueGameCode();
 
         await dbRun(
@@ -92,10 +98,11 @@ function createSocketServer(httpServer) {
               max_players,
               rounds_per_player,
               questions_per_round,
-              current_round
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+              current_round,
+              difficulty
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
           `,
-          [gameCode, socket.id, "LOBBY", maxPlayers, roundsPerPlayer, questionsPerRound, 0]
+          [gameCode, socket.id, "LOBBY", maxPlayers, roundsPerPlayer, questionsPerRound, 0, difficulty]
         );
 
         socket.join(gameCode);
@@ -103,7 +110,8 @@ function createSocketServer(httpServer) {
           gameCode,
           maxPlayers,
           roundsPerPlayer,
-          questionsPerRound
+          questionsPerRound,
+          difficulty
         });
         await emitPlayerListToRoom(gameCode);
       } catch (err) {

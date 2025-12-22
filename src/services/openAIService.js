@@ -29,9 +29,10 @@ function getModel() {
  * Generates a punny title and trivia questions for a given topic using OpenAI
  * @param {string} topic - The topic for the trivia round (e.g., "History", "Pizza")
  * @param {number} count - Number of questions to generate (default: 5)
+ * @param {string} difficulty - Difficulty level: 'Easy', 'Medium', 'Hard', or 'Mixed' (default: 'Mixed')
  * @returns {Promise<Object>} Object containing punnyTitle and questions array
  */
-async function generateRoundContent(topic, count = 5) {
+async function generateRoundContent(topic, count = 5, difficulty = 'Mixed') {
   // If model is set to "mock", return mock data
   if (currentModel === "mock") {
     console.log("[OpenAI] Using mock questions (model set to 'mock')");
@@ -57,6 +58,15 @@ Rules:
 7. The correct answer index must be 0-3
 8. Content must be family-friendly`;
 
+    // Generate difficulty instruction based on difficulty level
+    const difficultyInstructions = {
+      'Easy': 'Make questions very simple and common knowledge suitable for casual players.',
+      'Medium': 'Make questions standard trivia difficulty.',
+      'Hard': 'Make questions challenging and obscure, suitable for trivia buffs.',
+      'Mixed': 'Mix difficulty levels (easy, medium, hard).'
+    };
+    const difficultyInstruction = difficultyInstructions[difficulty] || difficultyInstructions['Mixed'];
+
     const userPrompt = `Generate a trivia round for the topic "${topic}".
 
 Return valid JSON matching this exact schema:
@@ -77,7 +87,7 @@ IMPORTANT:
 - DO NOT make the questions themselves puns or jokes
 - Include exactly ${count} questions
 - Make questions interesting and appropriate for general audiences
-- Mix difficulty levels (easy, medium, hard)`;
+- ${difficultyInstruction}`;
 
     console.log("\n" + "=".repeat(80));
     console.log("[OpenAI] 🚀 Starting API call for topic:", topic);
