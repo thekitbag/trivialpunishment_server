@@ -1,8 +1,64 @@
 const { MOCK_QUESTIONS, QUESTION_TIME_MS, REVEAL_TIME_MS, ROUND_OVER_DELAY_MS } = require("../config");
 const { dbRun, dbGet, dbAll } = require("../db");
 const { generateRoundContent } = require("./openAIService");
+const levenshtein = require("fast-levenshtein");
 
 const activeSessions = new Map();
+
+/**
+ * Normalizes a string for answer comparison
+ * @param {string} str - The string to normalize
+ * @returns {string} Normalized string
+ */
+function normalizeAnswer(str) {
+  if (!str) return '';
+
+  let normalized = str.toLowerCase().trim();
+
+  // Remove common articles from the start
+  normalized = normalized.replace(/^(the|a|an)\s+/i, '');
+
+  // Remove punctuation
+  normalized = normalized.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, '');
+
+  // Remove extra whitespace
+  normalized = normalized.replace(/\s+/g, ' ').trim();
+
+  return normalized;
+}
+
+/**
+ * Validates a user's text answer against accepted answers using fuzzy matching
+ * @param {string} userInput - The user's typed answer
+ * @param {string[]} acceptedAnswers - Array of acceptable answers
+ * @returns {boolean} True if answer is correct
+ */
+function validateAnswer(userInput, acceptedAnswers) {
+  if (!userInput || !acceptedAnswers || acceptedAnswers.length === 0) {
+    return false;
+  }
+
+  const normalizedInput = normalizeAnswer(userInput);
+
+  for (const acceptedAnswer of acceptedAnswers) {
+    const normalizedAccepted = normalizeAnswer(acceptedAnswer);
+
+    // Exact match after normalization
+    if (normalizedInput === normalizedAccepted) {
+      return true;
+    }
+
+    // Fuzzy match using Levenshtein distance
+    const distance = levenshtein.get(normalizedInput, normalizedAccepted);
+    const maxAllowedDistance = normalizedAccepted.length > 4 ? 2 : 1;
+
+    if (distance <= maxAllowedDistance) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 function randomGameCode() {
   const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -218,6 +274,7 @@ async function startQuestion(gameCode, io) {
   const timeLimitSeconds = Math.floor(QUESTION_TIME_MS / 1000);
 
   io.to(gameCode).emit("question_start", {
+    type: question.type || 'multiple_choice',
     text: question.text,
     options: question.options,
     round: session.currentRound,
@@ -276,9 +333,22 @@ async function revealAnswer(gameCode, io) {
   // Track points earned by each player for this question
   const pointsEarned = {};
 
+  // Determine question type (default to multiple_choice for backward compatibility)
+  const questionType = question.type || 'multiple_choice';
+
   for (const player of players) {
     const answerData = session.answers.get(player.id);
-    if (answerData && answerData.answerIndex === question.correct) {
+    let isCorrect = false;
+
+    // Check if answer is correct based on question type
+    if (questionType === 'multiple_choice') {
+      isCorrect = answerData && answerData.answerIndex === question.correct;
+    } else if (questionType === 'free_text') {
+      isCorrect = answerData && answerData.answerText &&
+                  validateAnswer(answerData.answerText, question.acceptedAnswers);
+    }
+
+    if (isCorrect) {
       // Calculate time-based points
       // Instant answer (0ms) = 100 points
       // Answer at time limit (QUESTION_TIME_MS) = 10 points
@@ -303,11 +373,16 @@ async function revealAnswer(gameCode, io) {
     score: p.score
   }));
 
-  // Extract the correct answer text
-  const correctAnswerText = question.options[question.correct];
+  // Extract the correct answer text based on question type
+  let correctAnswerText;
+  if (questionType === 'multiple_choice') {
+    correctAnswerText = question.options[question.correct];
+  } else if (questionType === 'free_text') {
+    correctAnswerText = question.correctAnswerDisplay;
+  }
 
   io.to(gameCode).emit("round_reveal", {
-    correctIndex: question.correct,
+    correctIndex: questionType === 'multiple_choice' ? question.correct : undefined,
     correctAnswerText: correctAnswerText,
     scores,
     pointsEarned

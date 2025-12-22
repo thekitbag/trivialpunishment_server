@@ -304,12 +304,27 @@ function createSocketServer(httpServer) {
 
     socket.on("submit_answer", async (payload) => {
       try {
-        const answerIndex = payload && typeof payload.answerIndex === "number" ? payload.answerIndex : -1;
         const gameCodeRaw = payload && typeof payload.gameCode === "string" ? payload.gameCode : "";
         const gameCode = gameCodeRaw.trim().toUpperCase();
 
-        if (answerIndex < 0 || answerIndex > 3 || !gameCode) {
+        if (!gameCode) {
           socket.emit("error", "Invalid answer payload");
+          return;
+        }
+
+        // Accept either answerIndex (for multiple choice) or answer (for free text)
+        const answerIndex = payload && typeof payload.answerIndex === "number" ? payload.answerIndex : null;
+        const answerText = payload && typeof payload.answer === "string" ? payload.answer : null;
+
+        // Must have either answerIndex or answerText
+        if (answerIndex === null && answerText === null) {
+          socket.emit("error", "Invalid answer payload: must provide answerIndex or answer");
+          return;
+        }
+
+        // Validate answerIndex range if provided
+        if (answerIndex !== null && (answerIndex < 0 || answerIndex > 3)) {
+          socket.emit("error", "Invalid answer index");
           return;
         }
 
@@ -335,10 +350,20 @@ function createSocketServer(httpServer) {
           return;
         }
 
-        session.answers.set(playerEntry.id, {
-          answerIndex: answerIndex,
+        // Store the answer with appropriate field
+        const answerData = {
           timestamp: Date.now()
-        });
+        };
+
+        if (answerIndex !== null) {
+          answerData.answerIndex = answerIndex;
+        }
+
+        if (answerText !== null) {
+          answerData.answerText = answerText;
+        }
+
+        session.answers.set(playerEntry.id, answerData);
 
         const hostSocket = await dbGet(`SELECT host_socket_id FROM games WHERE game_code = ?`, [gameCode]);
 
