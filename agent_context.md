@@ -107,11 +107,12 @@
 - All functions accept `io` parameter when they need to emit events.
 
 ### `src/services/openAIService.js`
-- Export `generateRoundContent(topic, count, difficulty)` - Generates punny title and trivia questions with specified difficulty.
+- Export `generateRoundContent(topic, count, difficulty, questionType)` - Generates content with specified parameters.
 - Export `setModel(model)` - Sets the model to use at runtime.
 - Export `getModel()` - Returns the current model being used.
 - Supports 7 models: mock, gpt-4o-mini, gpt-4o, gpt-4-turbo, gpt-4, o1, o3-mini.
 - Supports 4 difficulty levels: Easy, Medium, Hard, Mixed (default).
+- Supports Mixed Question Types: Generates JSON schema for both `multiple_choice` and `free_text` questions.
 - Tailors question difficulty based on setting: Easy (simple/common knowledge), Medium (standard), Hard (challenging/obscure), Mixed (varied).
 - Automatic fallback to mock questions if API fails or model set to "mock".
 - Comprehensive logging and validation of API responses.
@@ -160,7 +161,7 @@
 - **Server -> Client:**
   - `game_created` - Game successfully created
   - `game_started` - Game transitioning from LOBBY to STARTING
-  - `question_start` - New question begins (text, options, round number)
+  - `question_start` - New question begins (`text`, `options`, `type`, `timeLimit`, `punnyTitle`)
   - `player_answered` - Emitted to host when player submits answer
   - `round_reveal` - Question results (`correctIndex`, `correctAnswerText`, `scores`, `pointsEarned`)
   - `game_over` - Final results (sorted scores)
@@ -182,6 +183,9 @@
     - **AI Content Generation:** Integration with OpenAI with 7 selectable models (mock, gpt-4o-mini, gpt-4o, gpt-4-turbo, gpt-4, o1, o3-mini).
     - **Interactive Model Selection:** Startup prompt to choose model or set via QUESTION_MODEL env var.
     - **Difficulty Levels:** Configurable question difficulty (Easy, Medium, Hard, Mixed) set during game creation.
+    - **Question Types:** Supports both Multiple Choice and Free Text questions.
+    - **Fuzzy Validation:** Server-side fuzzy matching for free text answers (tolerates typos based on word length).
+    - **Question Shuffling:** Randomizes order of AI-generated questions to mix types.
     - **Time-Based Scoring:** Points awarded based on speed (100pts instant → 10pts at 30s, 0 for incorrect).
     - Mock question data source (fallback when API unavailable or model set to "mock").
     - Answer submission and validation with timestamp tracking.
