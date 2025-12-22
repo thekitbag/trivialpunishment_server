@@ -91,16 +91,7 @@ function randomGameCode() {
   return code;
 }
 
-// ... (in handleTopicSubmission)
 
-  // Generate questions for this topic - AWAIT to ensure they're ready before starting questions
-  try {
-    console.log(`[GameService] Generating questions for topic "${topic}" with difficulty "${game.difficulty}"...`);
-    const content = await generateRoundContent(topic, game.questions_per_round, game.difficulty);
-    session.currentRoundQuestions = shuffleArray(content.questions);
-    session.currentRoundTitle = content.punnyTitle;
-    console.log(`[GameService] ✅ Round ready: "${content.punnyTitle}" with ${content.questions.length} questions`);
-  } catch (error) {
 
 
 async function generateUniqueGameCode(maxAttempts = 25) {
