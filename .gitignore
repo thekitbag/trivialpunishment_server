@@ -5,7 +5,7 @@ node_modules/
 
 # sqlite db
 *.db
-server/game_data.db
+data/game_data.db
 
 # logs
 npm-debug.log*

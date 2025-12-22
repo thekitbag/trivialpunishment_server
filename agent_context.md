@@ -6,16 +6,18 @@
 - **Stack:** Node.js, Express, Socket.io, SQLite3.
 
 ## Architecture
-- **Entry Point:** `server.js` - Initializes database and starts HTTP/WebSocket servers.
-- **Database:** `server/game_data.db` (SQLite).
-- **Environment:** `.env` file (JWT_SECRET for token signing).
+- **Entry Point:** `server.js` - Prompts for model selection, initializes database, and starts HTTP/WebSocket servers.
+- **Database:** `data/game_data.db` (SQLite).
+- **Environment:** `.env` file (JWT_SECRET, OPENAI_API_KEY, QUESTION_MODEL).
 - **Modular Structure:**
-  - `src/config.js` - Environment variables, constants, and mock questions.
+  - `src/config.js` - Environment variables, constants, model configuration (7 available models), and mock questions.
   - `src/db/index.js` - Database connection, initialization, and helper functions (dbRun, dbGet, dbAll).
   - `src/services/authService.js` - Authentication logic (signup, login).
-  - `src/services/gameService.js` - Core game logic (sessions, questions, scoring).
+  - `src/services/gameService.js` - Core game logic (sessions, questions, time-based scoring).
+  - `src/services/openAIService.js` - AI question generation with configurable models (mock, gpt-4o-mini, gpt-4o, etc.).
   - `src/socket/index.js` - Socket.io server creation and event handlers.
   - `src/app.js` - Express app setup with HTTP logging and auth routes.
+  - `tests/` - Unit and integration tests (7 test files for various features).
 - **Communication:**
   - **Socket.io:** Handles real-time events (`create_game`, `join_game`, `game_started`).
   - **Socket Auth Middleware:** Verifies JWT tokens from `socket.handshake.auth.token`, attaches `socket.user` object.
@@ -45,14 +47,19 @@
 - **Game Lifecycle:**
   - **Creation:** Generates unique code, stores config in DB.
   - **Lobby:** Broadcast `update_player_list` on joins.
-  - **Auto-Start:** When `player_count === max_players`, transitions to `STARTING`, emits `game_started`, waits 3s, then starts first question.
+  - **Auto-Start:** When `player_count === max_players`, transitions to `STARTING`, emits `game_started`, waits 3s.
+  - **Topic Selection Phase (TOPIC_SELECTION state):**
+    - Rotates through players to be the "Picker".
+    - Emits `topic_request` to picker, `topic_waiting` to others.
+    - Picker submits topic -> Server generates questions via OpenAI (or fallback).
+    - Emits `topic_chosen` and transitions to QUESTION.
   - **Question Phase (QUESTION state):**
     - Selects question from mock data, emits `question_start` with text, options, round number.
     - Starts 30s timer for answers.
     - Listens for `submit_answer` events, stores answers in memory, emits `player_answered` to host.
     - If all players answer, immediately transitions to REVEAL.
   - **Reveal Phase (REVEAL state):**
-    - Calculates scores (+100 for correct answers).
+    - Calculates scores (Time-based: 100 points for instant answer, down to 10 points at time limit).
     - Updates player scores in DB.
     - Emits `round_reveal` with correct answer and updated scores.
     - Waits 5s, then starts next question OR transitions to GAME_OVER.
@@ -67,15 +74,18 @@
 
 ## Module Responsibilities
 
-### `server.js` (Entry Point - 24 lines)
+### `server.js` (Entry Point)
+- Prompt user for model selection (if QUESTION_MODEL not set in .env).
+- Set selected model in openAIService.
 - Initialize database and ensure schema updates.
 - Create HTTP server.
 - Initialize Socket.io with the HTTP server.
 - Start listening on configured PORT.
 
 ### `src/config.js`
-- Export all environment variables (PORT, JWT_SECRET, DB paths).
-- Define game constants (QUESTION_TIME_MS, REVEAL_TIME_MS, STARTING_DELAY_MS).
+- Export all environment variables (PORT, JWT_SECRET, OPENAI_API_KEY, QUESTION_MODEL, DB paths).
+- Define AVAILABLE_MODELS array (7 model options: mock, gpt-4o-mini, gpt-4o, gpt-4-turbo, gpt-4, o1, o3-mini).
+- Define game constants (QUESTION_TIME_MS, REVEAL_TIME_MS, STARTING_DELAY_MS, ROUND_OVER_DELAY_MS).
 - Store MOCK_QUESTIONS array.
 
 ### `src/db/index.js`
@@ -93,7 +103,16 @@
 - Export `activeSessions` Map for in-memory game state.
 - Export game helper functions: `generateUniqueGameCode`, `getPlayersForGame`, `getGame`, `clampInt`.
 - Export state machine functions: `startQuestion`, `revealAnswer`, `endGame`, `checkAllAnswered`.
+- Time-based scoring in `revealAnswer`: 100 points (instant) → 10 points (at 30s), 0 for incorrect.
 - All functions accept `io` parameter when they need to emit events.
+
+### `src/services/openAIService.js`
+- Export `generateRoundContent(topic, count)` - Generates punny title and trivia questions.
+- Export `setModel(model)` - Sets the model to use at runtime.
+- Export `getModel()` - Returns the current model being used.
+- Supports 7 models: mock, gpt-4o-mini, gpt-4o, gpt-4-turbo, gpt-4, o1, o3-mini.
+- Automatic fallback to mock questions if API fails or model set to "mock".
+- Comprehensive logging and validation of API responses.
 
 ### `src/socket/index.js`
 - Export `createSocketServer(httpServer)` function.
@@ -156,11 +175,14 @@
     - Socket.io authentication middleware.
     - Case-insensitive username handling.
   - **Game Engine:**
-    - Complete game state machine (LOBBY -> STARTING -> QUESTION -> REVEAL -> GAME_OVER).
-    - Mock question data source (5 questions in `src/config.js`).
-    - Answer submission and validation.
-    - Automatic scoring (+100 per correct answer).
-    - Timer-based question progression (30s question, 5s reveal, 3s starting delay).
+    - Complete game state machine (LOBBY -> STARTING -> TOPIC_SELECTION -> QUESTION -> REVEAL -> GAME_OVER).
+    - **Topic Selection:** Players take turns picking topics.
+    - **AI Content Generation:** Integration with OpenAI with 7 selectable models (mock, gpt-4o-mini, gpt-4o, gpt-4-turbo, gpt-4, o1, o3-mini).
+    - **Interactive Model Selection:** Startup prompt to choose model or set via QUESTION_MODEL env var.
+    - **Time-Based Scoring:** Points awarded based on speed (100pts instant → 10pts at 30s, 0 for incorrect).
+    - Mock question data source (fallback when API unavailable or model set to "mock").
+    - Answer submission and validation with timestamp tracking.
+    - Timer-based question progression (30s question, 5s reveal, 3s starting delay, 10s round over).
     - Early reveal when all players answer.
     - In-memory session management with proper cleanup.
     - Player cleanup on game over (allows rejoining new games).
@@ -168,6 +190,7 @@
   - **Infrastructure:**
     - Comprehensive HTTP and WebSocket logging.
     - Modular codebase with separation of concerns.
-    - Entry point reduced to 24 lines.
+    - Interactive startup experience with model selection.
     - All modules export testable functions.
-- **Next Steps:** TBD (potential: real question API, leaderboard persistence, power-ups).
+    - **Testing:** Dedicated `tests/` folder with 7 test files for various features.
+- **Next Steps:** Leaderboard persistence, Power-ups.

@@ -3,8 +3,8 @@ const path = require("path");
 
 module.exports = {
   PORT: Number(process.env.PORT) || 3001,
-  DB_DIR: path.join(__dirname, "../server"),
-  DB_PATH: path.join(__dirname, "../server/game_data.db"),
+  DB_DIR: path.join(__dirname, "../data"),
+  DB_PATH: path.join(__dirname, "../data/game_data.db"),
   JWT_SECRET: process.env.JWT_SECRET || "dev-secret-change-in-production",
 
   // Question generation model

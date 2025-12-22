@@ -109,7 +109,7 @@ Database initialized successfully.
 
 The server will:
 - Prompt for model selection (if not configured in `.env`)
-- Initialize the SQLite database (`server/game_data.db`)
+- Initialize the SQLite database (`data/game_data.db`)
 - Start the HTTP server on port 3001 (or your configured PORT)
 - Display the local network URL for mobile device connections
 - Begin accepting WebSocket connections
@@ -214,7 +214,7 @@ QUESTION_MODEL=o3-mini
 
 ### Database
 
-- **Location:** `server/game_data.db`
+- **Location:** `data/game_data.db`
 - **Type:** SQLite3
 - **Auto-created:** Yes, on first run
 - **Schema:** Automatically initialized and migrated
@@ -373,7 +373,7 @@ trivialpunishment_server/
 ├── README.md                 # This file
 ├── agent_context.md          # AI agent context documentation
 │
-├── server/
+├── data/
 │   └── game_data.db          # SQLite database (auto-created)
 │
 ├── src/
