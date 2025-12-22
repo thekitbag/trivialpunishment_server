@@ -1,5 +1,6 @@
 const { MOCK_QUESTIONS, QUESTION_TIME_MS, REVEAL_TIME_MS, ROUND_OVER_DELAY_MS } = require("../config");
 const { dbRun, dbGet, dbAll } = require("../db");
+const { generateRoundContent } = require("./openAIService");
 
 const activeSessions = new Map();
 
@@ -67,10 +68,14 @@ function getOrCreateSession(gameCode) {
       currentPickerIndex: 0,
       currentTopic: null,
       currentPickerUsername: null,
+      currentRoundQuestions: [],
+      currentRoundTitle: "",
       questionTimer: null,
       revealTimer: null,
       roundOverTimer: null,
-      answers: new Map()
+      isRevealing: false,
+      answers: new Map(),
+      questionStartTime: null
     });
   }
   return activeSessions.get(gameCode);
@@ -104,6 +109,8 @@ async function startTopicSelection(gameCode, io) {
   session.currentRound++;
   session.currentQuestionIndex = (session.currentRound - 1) * game.questions_per_round;
   session.currentTopic = null;
+  session.currentRoundQuestions = [];
+  session.currentRoundTitle = "";
 
   const pickerIndex = session.currentPickerIndex % players.length;
   const picker = players[pickerIndex];
@@ -158,6 +165,21 @@ async function handleTopicSubmission(gameCode, topic, submitterSocketId, io) {
     pickerUsername: expectedPicker.username
   });
 
+  // Generate questions for this topic - AWAIT to ensure they're ready before starting questions
+  try {
+    console.log(`[GameService] Generating questions for topic "${topic}"...`);
+    const content = await generateRoundContent(topic, game.questions_per_round);
+    session.currentRoundQuestions = content.questions;
+    session.currentRoundTitle = content.punnyTitle;
+    console.log(`[GameService] ✅ Round ready: "${content.punnyTitle}" with ${content.questions.length} questions`);
+  } catch (error) {
+    console.error(`[GameService] ❌ Error generating content for topic "${topic}":`, error.message);
+    // Fallback is already handled in openAIService, this is an extra safety catch
+    session.currentRoundQuestions = [];
+    session.currentRoundTitle = topic;
+  }
+
+  // Small delay to let players see the "topic chosen" screen before first question
   setTimeout(() => {
     startQuestion(gameCode, io);
   }, 2000);
@@ -178,11 +200,22 @@ async function startQuestion(gameCode, io) {
   ]);
 
   session.answers.clear();
+  session.questionStartTime = Date.now();
 
-  const question = MOCK_QUESTIONS[session.currentQuestionIndex % MOCK_QUESTIONS.length];
-  const timeLimitSeconds = Math.floor(QUESTION_TIME_MS / 1000);
   const questionsInRound = session.currentQuestionIndex - ((session.currentRound - 1) * game.questions_per_round);
   const questionNumInRound = questionsInRound + 1;
+
+  // Use generated questions if available, otherwise fallback to mock questions
+  let question;
+  if (session.currentRoundQuestions && session.currentRoundQuestions.length > 0) {
+    const indexInRound = questionNumInRound - 1;
+    question = session.currentRoundQuestions[indexInRound];
+  } else {
+    // Fallback to mock questions if generation failed or hasn't completed
+    question = MOCK_QUESTIONS[session.currentQuestionIndex % MOCK_QUESTIONS.length];
+  }
+
+  const timeLimitSeconds = Math.floor(QUESTION_TIME_MS / 1000);
 
   io.to(gameCode).emit("question_start", {
     text: question.text,
@@ -193,6 +226,7 @@ async function startQuestion(gameCode, io) {
     questionsPerRound: game.questions_per_round,
     topic: session.currentTopic,
     pickerUsername: session.currentPickerUsername,
+    punnyTitle: session.currentRoundTitle || session.currentTopic,
     timeLimit: timeLimitSeconds
   });
 
@@ -207,21 +241,51 @@ async function revealAnswer(gameCode, io) {
   const session = activeSessions.get(gameCode);
   if (!session) return;
 
+  // Check if reveal is already in progress using session flag (atomic check)
+  if (session.isRevealing) return;
+  session.isRevealing = true;
+
   const game = await getGame(gameCode);
-  if (!game || game.game_state !== "QUESTION") return;
+  if (!game || game.game_state !== "QUESTION") {
+    session.isRevealing = false;
+    return;
+  }
+
+  // Set state to REVEAL immediately to prevent duplicate calls
+  await dbRun(`UPDATE games SET game_state = ? WHERE game_code = ?`, ["REVEAL", gameCode]);
 
   if (session.questionTimer) {
     clearTimeout(session.questionTimer);
     session.questionTimer = null;
   }
 
-  const question = MOCK_QUESTIONS[session.currentQuestionIndex % MOCK_QUESTIONS.length];
+  const questionsInRound = session.currentQuestionIndex - ((session.currentRound - 1) * game.questions_per_round);
+  const questionNumInRound = questionsInRound + 1;
+
+  // Use generated questions if available, otherwise fallback to mock questions
+  let question;
+  if (session.currentRoundQuestions && session.currentRoundQuestions.length > 0) {
+    const indexInRound = questionNumInRound - 1;
+    question = session.currentRoundQuestions[indexInRound];
+  } else {
+    question = MOCK_QUESTIONS[session.currentQuestionIndex % MOCK_QUESTIONS.length];
+  }
+
   const players = await getPlayersForGame(gameCode);
 
   for (const player of players) {
-    const answer = session.answers.get(player.id);
-    if (answer !== undefined && answer === question.correct) {
-      await dbRun(`UPDATE players SET score = score + 100 WHERE id = ?`, [player.id]);
+    const answerData = session.answers.get(player.id);
+    if (answerData && answerData.answerIndex === question.correct) {
+      // Calculate time-based points
+      // Instant answer (0ms) = 100 points
+      // Answer at time limit (QUESTION_TIME_MS) = 10 points
+      // Linear interpolation in between
+      const timeElapsed = answerData.timestamp - session.questionStartTime;
+      const timeRatio = Math.min(timeElapsed / QUESTION_TIME_MS, 1); // Clamp to max 1
+      const points = Math.round(100 - (timeRatio * 90));
+      const finalPoints = Math.max(10, Math.min(100, points)); // Ensure between 10 and 100
+
+      await dbRun(`UPDATE players SET score = score + ? WHERE id = ?`, [finalPoints, player.id]);
     }
   }
 
@@ -232,8 +296,6 @@ async function revealAnswer(gameCode, io) {
     score: p.score
   }));
 
-  await dbRun(`UPDATE games SET game_state = ? WHERE game_code = ?`, ["REVEAL", gameCode]);
-
   io.to(gameCode).emit("round_reveal", {
     correctIndex: question.correct,
     scores
@@ -241,14 +303,14 @@ async function revealAnswer(gameCode, io) {
 
   session.currentQuestionIndex++;
 
-  const questionsInRound = session.currentQuestionIndex - ((session.currentRound - 1) * game.questions_per_round);
+  const questionsCompletedInRound = session.currentQuestionIndex - ((session.currentRound - 1) * game.questions_per_round);
 
   if (session.revealTimer) {
     clearTimeout(session.revealTimer);
     session.revealTimer = null;
   }
 
-  if (questionsInRound >= game.questions_per_round) {
+  if (questionsCompletedInRound >= game.questions_per_round) {
     session.revealTimer = setTimeout(() => {
       startRoundOver(gameCode, io);
     }, REVEAL_TIME_MS);
@@ -257,6 +319,9 @@ async function revealAnswer(gameCode, io) {
       startQuestion(gameCode, io);
     }, REVEAL_TIME_MS);
   }
+
+  // Reset flag after setting up next timer
+  session.isRevealing = false;
 }
 
 async function startRoundOver(gameCode, io) {

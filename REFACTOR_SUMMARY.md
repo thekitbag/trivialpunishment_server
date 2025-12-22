@@ -108,6 +108,3 @@ trivialpunishment_server/
 ✅ Client compatibility maintained
 ✅ No breaking changes
 
-## Original File Backup
-
-The original monolithic server is backed up as `server.js.backup` for reference.

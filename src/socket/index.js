@@ -327,7 +327,10 @@ function createSocketServer(httpServer) {
           return;
         }
 
-        session.answers.set(playerEntry.id, answerIndex);
+        session.answers.set(playerEntry.id, {
+          answerIndex: answerIndex,
+          timestamp: Date.now()
+        });
 
         const hostSocket = await dbGet(`SELECT host_socket_id FROM games WHERE game_code = ?`, [gameCode]);
 
