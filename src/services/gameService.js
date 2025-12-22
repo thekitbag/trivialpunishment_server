@@ -50,7 +50,15 @@ function validateAnswer(userInput, acceptedAnswers) {
 
     // Fuzzy match using Levenshtein distance
     const distance = levenshtein.get(normalizedInput, normalizedAccepted);
-    const maxAllowedDistance = normalizedAccepted.length > 4 ? 2 : 1;
+    let maxAllowedDistance = 0;
+
+    if (normalizedAccepted.length <= 3) {
+      maxAllowedDistance = 0; // Strict for short words
+    } else if (normalizedAccepted.length <= 6) {
+      maxAllowedDistance = 1; // 1 typo for medium words
+    } else {
+      maxAllowedDistance = 2; // 2 typos for long words
+    }
 
     if (distance <= maxAllowedDistance) {
       return true;
