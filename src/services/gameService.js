@@ -68,6 +68,20 @@ function validateAnswer(userInput, acceptedAnswers) {
   return false;
 }
 
+/**
+ * Fisher-Yates shuffle to randomize array order
+ * @param {Array} array - The array to shuffle
+ * @returns {Array} Shuffled array
+ */
+function shuffleArray(array) {
+  const shuffled = [...array];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+}
+
 function randomGameCode() {
   const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   let code = "";
@@ -76,6 +90,18 @@ function randomGameCode() {
   }
   return code;
 }
+
+// ... (in handleTopicSubmission)
+
+  // Generate questions for this topic - AWAIT to ensure they're ready before starting questions
+  try {
+    console.log(`[GameService] Generating questions for topic "${topic}" with difficulty "${game.difficulty}"...`);
+    const content = await generateRoundContent(topic, game.questions_per_round, game.difficulty);
+    session.currentRoundQuestions = shuffleArray(content.questions);
+    session.currentRoundTitle = content.punnyTitle;
+    console.log(`[GameService] ✅ Round ready: "${content.punnyTitle}" with ${content.questions.length} questions`);
+  } catch (error) {
+
 
 async function generateUniqueGameCode(maxAttempts = 25) {
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -233,7 +259,7 @@ async function handleTopicSubmission(gameCode, topic, submitterSocketId, io) {
   try {
     console.log(`[GameService] Generating questions for topic "${topic}" with difficulty "${game.difficulty}"...`);
     const content = await generateRoundContent(topic, game.questions_per_round, game.difficulty);
-    session.currentRoundQuestions = content.questions;
+    session.currentRoundQuestions = shuffleArray(content.questions);
     session.currentRoundTitle = content.punnyTitle;
     console.log(`[GameService] ✅ Round ready: "${content.punnyTitle}" with ${content.questions.length} questions`);
   } catch (error) {
